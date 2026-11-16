@@ -23,8 +23,11 @@ Actions, готовый `.exe` лежит в артефактах сборки �
 
 ## Установка
 
-1. Скачайте `chek-backup.exe` из раздела **Releases** (или из артефактов
-   последней сборки Actions).
+1. Скачайте `chek-backup.exe`:
+
+   * последний релиз — <https://github.com/zigorminsk-debug/chek-Backup/releases/latest/download/chek-backup.exe>;
+   * свежая сборка из `main` — <https://github.com/zigorminsk-debug/chek-Backup/releases/tag/latest-build>;
+   * либо из артефактов нужного запуска Actions.
 2. Положите файл в постоянную папку, например `C:\Program Files\ChekBackup\`.
 3. Запустите. Программа появится в трее (синяя иконка конверта) и сразу
    откроет окно настроек — введите параметры IMAP и пароль ящика.
