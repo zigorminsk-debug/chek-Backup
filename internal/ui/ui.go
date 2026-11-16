@@ -68,11 +68,13 @@ type UI struct {
 	alertWin    fyne.Window
 	settingsWin fyne.Window
 
-	checking   bool
-	last       checker.Result
-	haveResult bool
-	next       time.Time
-	autostart  bool
+	checking     bool
+	last         checker.Result
+	haveResult   bool
+	next         time.Time
+	autostart    bool
+	statusOpen   bool
+	settingsOpen bool
 
 	// Status window widgets.
 	statusTitle    *canvas.Text
