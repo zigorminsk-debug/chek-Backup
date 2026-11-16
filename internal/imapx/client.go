@@ -16,7 +16,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/zigorminsk-debug/chek-Backup/internal/neterr"
 )
+
+// defaultHost is only used to build a helpful message when a name cannot be
+// resolved; it is not a fallback for the configuration.
+const defaultHost = "mail.csl.by"
 
 // TLSMode describes how the connection is protected.
 type TLSMode string
@@ -115,7 +121,7 @@ func Dial(ctx context.Context, opt Options) (*Client, error) {
 		conn, err = dialer.DialContext(ctx, "tcp", addr)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("imapx: не удалось подключиться к %s: %w", addr, err)
+		return nil, dialError(opt, addr, err)
 	}
 	c := &Client{
 		conn:    conn,
@@ -128,12 +134,12 @@ func Dial(ctx context.Context, opt Options) (*Client, error) {
 	c.deadline(ctx)
 	if err := c.greeting(); err != nil {
 		_ = conn.Close()
-		return nil, err
+		return nil, greetingError(opt, port, err)
 	}
 	if opt.Mode == TLSStartTLS {
 		if err := c.startTLS(ctx, tlsConfig); err != nil {
 			_ = conn.Close()
-			return nil, err
+			return nil, fmt.Errorf("imapx: не удалось перейти на шифрование (STARTTLS) после подключения к %s: %w. Проверьте режим шифрования и порт (для STARTTLS обычно 143).", addr, err)
 		}
 	}
 	if _, err := c.command(ctx, "LOGIN %s %s", quote(opt.Username), quote(opt.Password)); err != nil {
@@ -457,4 +463,51 @@ func quote(s string) string {
 	}
 	sb.WriteByte('"')
 	return sb.String()
+}
+
+// dialError turns a network error into a message that names the stage that
+// failed and lists the most probable causes for the given endpoint.
+func dialError(opt Options, addr string, err error) error {
+	port := opt.Port
+	if port == 0 {
+		if opt.Mode == TLSStartTLS || opt.Mode == TLSNone {
+			port = 143
+		} else {
+			port = 993
+		}
+	}
+	switch {
+	case neterr.IsRefused(err):
+		return fmt.Errorf("imapx: %s (%s) отказал в соединении на порту %d (RST). "+
+			"Вероятные причины: доступ к IMAP для вашей сети запрещён на сервере (Kerio Connect: "+
+			"Services → IMAP → Access, а также Security → Intrusion Prevention — заблокированные IP); "+
+			"порт закрыт файрволом; либо сервер IMAP слушает другой порт (SSL/TLS обычно 993, STARTTLS — 143). "+
+			"Проверить по шагам можно кнопкой «Диагностика» в настройках", addr, opt.Host, port)
+	case neterr.IsTimeout(err):
+		return fmt.Errorf("imapx: %s: порт %d не ответил за отведённое время — соединение фильтруется "+
+			"(файрвол, антивирус или шлюз). Проверьте сеть и правила доступа", addr, port)
+	case neterr.IsUnreachable(err):
+		return fmt.Errorf("imapx: %s: сеть или сервер недоступны (нет маршрута). Проверьте подключение к сети", addr)
+	case neterr.IsReset(err):
+		return fmt.Errorf("imapx: %s: сервер разорвал соединение при подключении. "+
+			"Часто это блокировка IP после нескольких неудачных попыток входа "+
+			"(Kerio Connect → Security → Intrusion Prevention) либо запрет IMAP по адресу клиента", addr)
+	case neterr.IsDNS(err):
+		return fmt.Errorf("imapx: имя сервера %q не найдено в DNS. Укажите существующее имя, "+
+			"например %s", opt.Host, defaultHost)
+	}
+	return fmt.Errorf("imapx: не удалось подключиться к %s: %w", addr, err)
+}
+
+// greetingError explains a failure that happened after the TCP (or TLS)
+// connection was established: the server accepted the socket but did not send
+// an IMAP greeting.
+func greetingError(opt Options, port int, err error) error {
+	if neterr.IsEOF(err) {
+		return fmt.Errorf("imapx: %s:%d принял соединение, но сразу закрыл его, не прислав приветствие IMAP. "+
+			"Обычно это блокировка IP или запрет доступа к почтовым протоколам для вашей сети на стороне сервера "+
+			"(Kerio Connect: Security → Intrusion Prevention, Services → IMAP → Access); "+
+			"реже — неверный режим шифрования (для 993 нужен SSL/TLS, для 143 — STARTTLS)", opt.Host, port)
+	}
+	return fmt.Errorf("imapx: сервер %s:%d не ответил как IMAP: %w. Проверьте порт и режим шифрования", opt.Host, port, err)
 }

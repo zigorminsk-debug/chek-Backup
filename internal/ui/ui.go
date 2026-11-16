@@ -24,6 +24,7 @@ import (
 	"github.com/zigorminsk-debug/chek-Backup/internal/config"
 	"github.com/zigorminsk-debug/chek-Backup/internal/logx"
 	"github.com/zigorminsk-debug/chek-Backup/internal/platform"
+	"github.com/zigorminsk-debug/chek-Backup/internal/probe"
 	"github.com/zigorminsk-debug/chek-Backup/internal/state"
 )
 
@@ -41,6 +42,8 @@ type Callbacks struct {
 	SaveConfig func(*config.Config) error
 	// TestConfig verifies the mailbox connection without changing anything.
 	TestConfig func(*config.Config) error
+	// Diagnose checks DNS, TCP, TLS and the IMAP greeting step by step.
+	Diagnose func(*config.Config) *probe.Report
 	// Quit terminates the application.
 	Quit func()
 	// LogPath returns the log file location.

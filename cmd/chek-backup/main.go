@@ -15,6 +15,7 @@ import (
 	"github.com/zigorminsk-debug/chek-Backup/internal/config"
 	"github.com/zigorminsk-debug/chek-Backup/internal/logx"
 	"github.com/zigorminsk-debug/chek-Backup/internal/platform"
+	"github.com/zigorminsk-debug/chek-Backup/internal/probe"
 	"github.com/zigorminsk-debug/chek-Backup/internal/scheduler"
 	"github.com/zigorminsk-debug/chek-Backup/internal/state"
 	"github.com/zigorminsk-debug/chek-Backup/internal/ui"
@@ -44,7 +45,7 @@ func main() {
 		return
 	}
 
-	cfg, created, loadErr := config.Load(cfgPath)
+	cfg, created, repairedFrom, loadErr := config.LoadEx(cfgPath)
 	if loadErr != nil {
 		// A corrupt file must not prevent the watcher from starting: keep a
 		// backup copy and fall back to the defaults.
@@ -52,8 +53,15 @@ func main() {
 		cfg = config.Default()
 		created = true
 	}
+	migratedHost := repairedFrom
 	if created {
 		_ = cfg.Save(cfgPath)
+	} else if repairedFrom != "" {
+		// The server name was repaired (for example the non existing
+		// imap.csl.by); persist the fixed value so the user sees it.
+		if saveErr := cfg.Save(cfgPath); saveErr != nil {
+			fmt.Fprintf(os.Stderr, "не удалось сохранить исправленные настройки: %v\n", saveErr)
+		}
 	}
 
 	logPath, err := platform.LogPath()
@@ -68,6 +76,9 @@ func main() {
 	log.Infof("Chek Backup %s запускается (автозапуск: %v)", version, *autostartFlag)
 	if loadErr != nil {
 		log.Errorf("файл настроек повреждён и переименован: %v", loadErr)
+	}
+	if migratedHost != "" {
+		log.Infof("сервер IMAP в настройках исправлен автоматически: %s", migratedHost)
 	}
 
 	alreadyRunning, release, err := platform.SingleInstance(platform.AppName)
@@ -137,6 +148,7 @@ func (c *controller) run() {
 		CheckNow:   func() { go c.checkNow("вручную") },
 		SaveConfig: c.saveConfig,
 		TestConfig: c.testConfig,
+		Diagnose:   c.diagnose,
 		Quit:       c.quit,
 		LogPath:    func() string { return c.log.Path() },
 		ConfigPath: func() string { return c.cfgPath },
@@ -284,6 +296,13 @@ func (c *controller) saveConfig(cfg *config.Config) error {
 		cfg.IMAP.Username, cfg.IMAP.Host, cfg.Schedule.DailyAt, cfg.Schedule.LookbackHours)
 	c.startScheduler()
 	return nil
+}
+
+// diagnose reports on which stage (DNS, TCP, TLS, IMAP) the connection fails.
+func (c *controller) diagnose(cfg *config.Config) *probe.Report {
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout()+5*time.Second)
+	defer cancel()
+	return checker.Diagnose(ctx, cfg)
 }
 
 // testConfig verifies the mailbox connection with the given settings.
