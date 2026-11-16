@@ -223,3 +223,23 @@ func TestNeedsAttention(t *testing.T) {
 		}
 	}
 }
+
+// TestNetworkErrorsAreRecognised guards the gate that decides whether the
+// step by step diagnosis is attached to a failed check.
+func TestNetworkErrorsAreRecognised(t *testing.T) {
+	cases := []struct {
+		err  error
+		want bool
+	}{
+		{errors.New("dial tcp 37.17.55.196:993: connectex: No connection could be made because the target machine actively refused it."), true},
+		{errors.New("dial tcp: lookup imap.csl.by: no such host"), true},
+		{errors.New("imapx: сервер отклонил вход для backup@csl.by"), false},
+		{errors.New("пароль не задан"), false},
+		{nil, false},
+	}
+	for _, tc := range cases {
+		if got := isNetworkError(tc.err); got != tc.want {
+			t.Errorf("isNetworkError(%v) = %v, хотим %v", tc.err, got, tc.want)
+		}
+	}
+}
