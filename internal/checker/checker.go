@@ -13,6 +13,7 @@ import (
 	"github.com/zigorminsk-debug/chek-Backup/internal/config"
 	"github.com/zigorminsk-debug/chek-Backup/internal/imapx"
 	"github.com/zigorminsk-debug/chek-Backup/internal/logx"
+	"github.com/zigorminsk-debug/chek-Backup/internal/probe"
 	"github.com/zigorminsk-debug/chek-Backup/internal/rules"
 )
 
@@ -51,6 +52,19 @@ type Result struct {
 	Messages   []Message
 	// Err keeps the technical error of a failed check, if any.
 	Err error
+}
+
+// Diagnose connects to the endpoint step by step (DNS, TCP, TLS, приветствие
+// IMAP) and returns a report with a Russian explanation of the first failure.
+// It is used by the "Диагностика" button and by the failure path of a check.
+func Diagnose(ctx context.Context, cfg *config.Config) *probe.Report {
+	return probe.Run(ctx, probe.Options{
+		Host:               cfg.IMAP.Host,
+		Port:               cfg.IMAP.Port,
+		Mode:               string(cfg.IMAP.Mode),
+		Timeout:            cfg.Timeout(),
+		InsecureSkipVerify: cfg.IMAP.InsecureSkipVerify,
+	})
 }
 
 // Mailbox is the subset of the IMAP client used by the checker.
@@ -137,7 +151,24 @@ func (c *Checker) Run(ctx context.Context) Result {
 
 	mailbox, closeFn, err := c.open(ctx)
 	if err != nil {
-		return c.fail(res, "Нет связи с почтовым ящиком", err)
+		res = c.fail(res, "Нет связи с почтовым ящиком", err)
+		// The raw network error rarely helps the user, a step by step
+		// diagnosis names the failing stage and gives a hint.
+		if rep := Diagnose(ctx, c.cfg); rep != nil && !rep.OK() {
+			res.Summary = rep.Reason
+			if rep.Hint != "" {
+				res.Details = append(res.Details, "Что делать: "+rep.Hint)
+			}
+			for _, st := range rep.Steps {
+				state := "успешно"
+				if !st.OK {
+					state = "ошибка"
+				}
+				res.Details = append(res.Details, fmt.Sprintf("%s — %s (%s)", st.Kind.Title(), state, st.Detail))
+			}
+			res.Err = err
+		}
+		return res
 	}
 	if closeFn != nil {
 		defer func() { _ = closeFn() }()

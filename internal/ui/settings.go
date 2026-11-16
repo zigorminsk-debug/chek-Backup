@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -59,6 +60,11 @@ type settingsForm struct {
 
 	saveBtn *widget.Button
 	testBtn *widget.Button
+	diagBtn *widget.Button
+
+	reportTitle *widget.Label
+	reportText  *widget.Label
+	reportBox   *fyne.Container
 }
 
 // ShowSettings opens (or focuses) the settings window.
@@ -86,7 +92,7 @@ func (u *UI) buildSettingsWindow() fyne.Window {
 
 	f.host = widget.NewEntry()
 	f.host.SetText(cfg.IMAP.Host)
-	f.host.SetPlaceHolder("imap.csl.by")
+	f.host.SetPlaceHolder(config.DefaultHost)
 
 	f.port = widget.NewEntry()
 	f.port.SetText(strconv.Itoa(cfg.IMAP.Port))
@@ -207,6 +213,7 @@ func (u *UI) buildSettingsWindow() fyne.Window {
 	f.saveBtn = widget.NewButton("Сохранить", f.save)
 	f.saveBtn.Importance = widget.HighImportance
 	f.testBtn = widget.NewButton("Проверить подключение", f.testConnection)
+	f.diagBtn = widget.NewButton("Диагностика", f.diagnose)
 	cancelBtn := widget.NewButton("Отмена", func() {
 		u.settingsOpen = false
 		w.Hide()
@@ -215,21 +222,37 @@ func (u *UI) buildSettingsWindow() fyne.Window {
 	footer := container.NewHBox(
 		f.saveBtn,
 		f.testBtn,
+		f.diagBtn,
 		layout.NewSpacer(),
 		cancelBtn,
 	)
+
+	// The diagnosis report lives under the tabs so that it does not cover
+	// the settings with a modal dialog. A Label is used instead of an Entry:
+	// labels are read only and wrap long lines, so the report cannot be
+	// edited or scrolled sideways by accident.
+	f.reportTitle = widget.NewLabel("")
+	f.reportTitle.TextStyle = fyne.TextStyle{Bold: true}
+	f.reportTitle.Wrapping = fyne.TextWrapWord
+	f.reportTitle.Hide()
+	f.reportText = widget.NewLabel("")
+	f.reportText.Wrapping = fyne.TextWrapWord
+	f.reportText.Hide()
+	report := container.NewVBox(f.reportTitle, f.reportText)
+	report.Hide()
+	f.reportBox = report
 
 	pathNote := widget.NewLabel("Файл настроек: " + u.configPathHint())
 	pathNote.TextStyle = fyne.TextStyle{Italic: true}
 
 	content := container.NewBorder(
 		nil,
-		container.NewVBox(footer, pathNote),
+		container.NewVBox(report, footer, pathNote),
 		nil, nil,
 		tabs,
 	)
 	w.SetContent(container.NewPadded(content))
-	w.Resize(fyne.NewSize(720, 560))
+	w.Resize(fyne.NewSize(760, 660))
 	w.CenterOnScreen()
 	return w
 }
@@ -364,6 +387,45 @@ func (f *settingsForm) save() {
 	}
 }
 
+// connectionCandidate is one combination of port and encryption that is tried
+// by the connection test.
+type connectionCandidate struct {
+	Port int
+	Mode config.TLSMode
+}
+
+// candidates returns the endpoint variants that are worth trying: first the one
+// from the form, then the other two standard combinations.
+func (f *settingsForm) candidates(cfg *config.Config) []connectionCandidate {
+	current := connectionCandidate{Port: cfg.IMAP.Port, Mode: cfg.IMAP.Mode}
+	others := []connectionCandidate{
+		{Port: 993, Mode: config.TLSImplicit},
+		{Port: 143, Mode: config.TLSStartTLS},
+		{Port: 143, Mode: config.TLSNone},
+	}
+	out := []connectionCandidate{current}
+	for _, c := range others {
+		if c.Port == current.Port && c.Mode == current.Mode {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func (f *settingsForm) setBusy(busy bool) {
+	for _, b := range []*widget.Button{f.testBtn, f.diagBtn, f.saveBtn} {
+		if b == nil {
+			continue
+		}
+		if busy {
+			b.Disable()
+			continue
+		}
+		b.Enable()
+	}
+}
+
 func (f *settingsForm) testConnection() {
 	cfg, err := f.collect()
 	if err != nil {
@@ -373,21 +435,89 @@ func (f *settingsForm) testConnection() {
 	if f.ui.cb.TestConfig == nil {
 		return
 	}
-	f.testBtn.Disable()
-	done := make(chan error, 1)
-	go func() { done <- f.ui.cb.TestConfig(cfg) }()
+	candidates := f.candidates(cfg)
+	f.setBusy(true)
+	f.hideReport()
 	go func() {
-		err := <-done
+		type attempt struct {
+			cand connectionCandidate
+			err  error
+		}
+		var tries []attempt
+		var success *connectionCandidate
+		for _, cand := range candidates {
+			try := cfg.Clone()
+			try.IMAP.Port = cand.Port
+			try.IMAP.Mode = cand.Mode
+			testErr := f.ui.cb.TestConfig(try)
+			tries = append(tries, attempt{cand: cand, err: testErr})
+			if testErr == nil {
+				c := cand
+				success = &c
+				break
+			}
+		}
 		fyne.Do(func() {
-			f.testBtn.Enable()
-			if err != nil {
-				dialog.ShowError(fmt.Errorf("подключиться не удалось: %w", err), f.w)
+			f.setBusy(false)
+			if success != nil {
+				f.port.SetText(strconv.Itoa(success.Port))
+				f.mode.SetSelected(tlsLabel(success.Mode))
+				dialog.ShowInformation("Подключение успешно",
+					fmt.Sprintf("Ящик %s на %s доступен.\nПараметры для сохранения: порт %d, %s.",
+						cfg.IMAP.Username, cfg.IMAP.Host, success.Port, tlsLabel(success.Mode)), f.w)
 				return
 			}
-			dialog.ShowInformation("Подключение успешно",
-				fmt.Sprintf("Ящик %s на %s доступен.", cfg.IMAP.Username, cfg.IMAP.Host), f.w)
+			var b strings.Builder
+			b.WriteString("Подключиться не удалось ни одним из стандартных способов:\n\n")
+			for _, t := range tries {
+				fmt.Fprintf(&b, "• порт %d, %s — %v\n", t.cand.Port, tlsLabel(t.cand.Mode), t.err)
+			}
+			b.WriteString("\nНажмите «Диагностика», чтобы увидеть, на каком шаге (DNS, порт, TLS, IMAP) всё останавливается.")
+			dialog.ShowError(errors.New(b.String()), f.w)
 		})
 	}()
+}
+
+// diagnose runs the step by step check and shows a report under the tabs.
+func (f *settingsForm) diagnose() {
+	cfg, err := f.collect()
+	if err != nil {
+		dialog.ShowError(err, f.w)
+		return
+	}
+	if f.ui.cb.Diagnose == nil {
+		return
+	}
+	f.setBusy(true)
+	f.showReport("Диагностика…", "Проверяю DNS, TCP-порт, TLS и приветствие IMAP. Это занимает до "+strconv.Itoa(int(cfg.Timeout().Seconds()))+" с.")
+	go func() {
+		rep := f.ui.cb.Diagnose(cfg)
+		fyne.Do(func() {
+			f.setBusy(false)
+			if rep == nil {
+				f.showReport("Диагностика", "Не удалось получить отчёт.")
+				return
+			}
+			title := "Диагностика: подключение работает"
+			if !rep.OK() {
+				title = "Диагностика: " + strings.TrimSuffix(rep.Reason, ".")
+			}
+			f.showReport(title, rep.Text())
+		})
+	}()
+}
+
+func (f *settingsForm) showReport(title, text string) {
+	f.reportTitle.SetText(title)
+	f.reportText.SetText(text)
+	f.reportBox.Show()
+	f.reportTitle.Show()
+	f.reportText.Show()
+	f.reportBox.Refresh()
+}
+
+func (f *settingsForm) hideReport() {
+	f.reportBox.Hide()
 }
 
 func (u *UI) configPathHint() string {

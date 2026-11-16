@@ -27,6 +27,22 @@ const (
 // PasswordPrefix marks a secret that was encrypted with the Windows DPAPI.
 const PasswordPrefix = "dpapi:"
 
+// DefaultHost is the mailbox server of csl.by. There is no imap.csl.by name in
+// DNS: the domain publishes mail.csl.by, which is why it is the default.
+const DefaultHost = "mail.csl.by"
+
+// LegacyHosts maps server names that were suggested by earlier versions (or by
+// a copy-paste habit) to the real one. The names do not exist in DNS, so
+// replacing them automatically cannot break a working configuration.
+var LegacyHosts = map[string]string{
+	"imap.csl.by":  DefaultHost,
+	"mails.csl.by": DefaultHost,
+	"smtp.csl.by":  DefaultHost,
+	"pop.csl.by":   DefaultHost,
+	"imap.csl.com": DefaultHost,
+	"imap.csl.net": DefaultHost,
+}
+
 // IMAP holds the mailbox connection settings.
 type IMAP struct {
 	Host               string  `json:"host"`
@@ -98,7 +114,7 @@ type Config struct {
 func Default() *Config {
 	return &Config{
 		IMAP: IMAP{
-			Host:           "imap.csl.by",
+			Host:           DefaultHost,
 			Port:           993,
 			Mode:           TLSImplicit,
 			Username:       "backup@csl.by",
@@ -152,19 +168,41 @@ func (c *Config) Clone() *Config {
 // Load reads the configuration from path. A missing file yields the default
 // configuration and created=false.
 func Load(path string) (cfg *Config, created bool, err error) {
+	cfg, created, _, err = LoadEx(path)
+	return cfg, created, err
+}
+
+// LoadEx is Load with an extra report: when the stored IMAP server name was a
+// known legacy value (for example the non existing imap.csl.by), repairedFrom
+// describes the replacement as "imap.csl.by → mail.csl.by" so that the caller
+// can persist the fixed configuration.
+func LoadEx(path string) (cfg *Config, created bool, repairedFrom string, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return Default(), true, nil
+			return Default(), true, "", nil
 		}
-		return nil, false, err
+		return nil, false, "", err
 	}
+	// The raw host is read separately: Normalize() replaces it, so afterwards
+	// it is impossible to tell whether the file contained the legacy name.
+	var raw struct {
+		IMAP struct {
+			Host string `json:"host"`
+		} `json:"imap"`
+	}
+	_ = json.Unmarshal(data, &raw)
+	oldHost := strings.TrimSpace(raw.IMAP.Host)
+
 	cfg = Default()
 	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, false, fmt.Errorf("config: %s: %w", path, err)
+		return nil, false, "", fmt.Errorf("config: %s: %w", path, err)
 	}
 	cfg.Normalize()
-	return cfg, false, nil
+	if oldHost != "" && !strings.EqualFold(oldHost, cfg.IMAP.Host) {
+		repairedFrom = oldHost + " → " + cfg.IMAP.Host
+	}
+	return cfg, false, repairedFrom, nil
 }
 
 // Save writes the configuration to path, creating parent directories.
@@ -190,6 +228,9 @@ func (c *Config) Normalize() {
 	d := Default()
 	if c.IMAP.Host == "" {
 		c.IMAP.Host = d.IMAP.Host
+	}
+	if real, ok := LegacyHosts[strings.ToLower(strings.TrimSpace(c.IMAP.Host))]; ok {
+		c.IMAP.Host = real
 	}
 	if c.IMAP.Port <= 0 {
 		if c.IMAP.Mode == TLSStartTLS || c.IMAP.Mode == TLSNone {
