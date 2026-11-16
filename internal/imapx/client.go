@@ -15,8 +15,9 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/zigorminsk-debug/chek-Backup/internal/neterr"
 )
 
 // defaultHost is only used to build a helpful message when a name cannot be
@@ -475,27 +476,23 @@ func dialError(opt Options, addr string, err error) error {
 			port = 993
 		}
 	}
-	if errors.Is(err, syscall.ECONNREFUSED) {
+	switch {
+	case neterr.IsRefused(err):
 		return fmt.Errorf("imapx: %s (%s) отказал в соединении на порту %d (RST). "+
 			"Вероятные причины: доступ к IMAP для вашей сети запрещён на сервере (Kerio Connect: "+
 			"Services → IMAP → Access, а также Security → Intrusion Prevention — заблокированные IP); "+
 			"порт закрыт файрволом; либо сервер IMAP слушает другой порт (SSL/TLS обычно 993, STARTTLS — 143). "+
 			"Проверить по шагам можно кнопкой «Диагностика» в настройках", addr, opt.Host, port)
-	}
-	if errors.Is(err, syscall.ETIMEDOUT) || errors.Is(err, context.DeadlineExceeded) {
+	case neterr.IsTimeout(err):
 		return fmt.Errorf("imapx: %s: порт %d не ответил за отведённое время — соединение фильтруется "+
 			"(файрвол, антивирус или шлюз). Проверьте сеть и правила доступа", addr, port)
-	}
-	if errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
+	case neterr.IsUnreachable(err):
 		return fmt.Errorf("imapx: %s: сеть или сервер недоступны (нет маршрута). Проверьте подключение к сети", addr)
-	}
-	if errors.Is(err, syscall.ECONNRESET) {
+	case neterr.IsReset(err):
 		return fmt.Errorf("imapx: %s: сервер разорвал соединение при подключении. "+
 			"Часто это блокировка IP после нескольких неудачных попыток входа "+
 			"(Kerio Connect → Security → Intrusion Prevention) либо запрет IMAP по адресу клиента", addr)
-	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
+	case neterr.IsDNS(err):
 		return fmt.Errorf("imapx: имя сервера %q не найдено в DNS. Укажите существующее имя, "+
 			"например %s", opt.Host, defaultHost)
 	}
@@ -506,7 +503,7 @@ func dialError(opt Options, addr string, err error) error {
 // connection was established: the server accepted the socket but did not send
 // an IMAP greeting.
 func greetingError(opt Options, port int, err error) error {
-	if errors.Is(err, io.EOF) {
+	if neterr.IsEOF(err) {
 		return fmt.Errorf("imapx: %s:%d принял соединение, но сразу закрыл его, не прислав приветствие IMAP. "+
 			"Обычно это блокировка IP или запрет доступа к почтовым протоколам для вашей сети на стороне сервера "+
 			"(Kerio Connect: Security → Intrusion Prevention, Services → IMAP → Access); "+

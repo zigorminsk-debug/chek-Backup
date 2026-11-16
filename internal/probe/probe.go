@@ -10,12 +10,12 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/zigorminsk-debug/chek-Backup/internal/neterr"
 )
 
 // StepKind identifies a diagnosis stage.
@@ -345,15 +345,15 @@ func certName(state tls.ConnectionState) string {
 // detail line.
 func explain(err error, port int, mode, stage string) (reason, detail string) {
 	switch {
-	case errors.Is(err, syscall.ECONNREFUSED):
+	case neterr.IsRefused(err):
 		return fmt.Sprintf("Соединение с портом %d отклонено (RST).", port),
 			"порт закрыт: сервер или сеть ответили отказом в соединении"
-	case errors.Is(err, syscall.ETIMEDOUT), errors.Is(err, context.DeadlineExceeded):
+	case neterr.IsTimeout(err):
 		return fmt.Sprintf("Порт %d не ответил за отведённое время.", port),
 			"таймаут: пакеты уходят, но ответ не приходит (фильтрация на пути)"
-	case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH):
+	case neterr.IsUnreachable(err):
 		return "Сеть или хост недоступны.", "нет маршрута до сервера"
-	case errors.Is(err, syscall.ECONNRESET):
+	case neterr.IsReset(err):
 		return "Соединение разорвано удалённой стороной.", "сервер сбросил соединение"
 	}
 	var unknownAuthority *tls.CertificateVerificationError
@@ -365,12 +365,12 @@ func explain(err error, port int, mode, stage string) (reason, detail string) {
 		return "Сервер не говорит по TLS на этом порту.",
 			"получен ответ, не похожий на TLS (возможно, порт без шифрования, например 143)"
 	}
-	if strings.Contains(err.Error(), "first record does not look like a TLS handshake") {
+	if strings.Contains(strings.ToLower(err.Error()), "does not look like a tls handshake") {
 		return "Сервер не говорит по TLS на этом порту.",
 			"получен ответ, не похожий на TLS (возможно, порт без шифрования, например 143)"
 	}
 	if stage == "greeting" || stage == "tls" {
-		if errors.Is(err, io.EOF) {
+		if neterr.IsEOF(err) {
 			return "Сервер закрыл соединение, не поздоровавшись.",
 				"получен EOF: соединение принято, но сервер сразу его закрыл"
 		}
@@ -381,14 +381,14 @@ func explain(err error, port int, mode, stage string) (reason, detail string) {
 
 func tcpHint(err error, port int, mode string) string {
 	switch {
-	case errors.Is(err, syscall.ECONNREFUSED):
+	case neterr.IsRefused(err):
 		if mode == "implicit" && port != 993 {
 			return fmt.Sprintf("Похоже, порт %d не обслуживается. Для SSL/TLS обычно используется 993, для STARTTLS — 143. Если порты верные, значит доступ к IMAP закрыт на стороне сервера: проверьте список разрешённых IP в Kerio Connect (Services → IMAP → Access) и блокировку IP в Intrusion Prevention.", port)
 		}
 		return "Сервер жив, но порт отбивает соединение. Проверьте: 1) разрешён ли IMAP/POP3 для вашей сети в Kerio Connect (Services → Access, Intrusion Prevention — заблокированные IP); 2) нет ли правила файрвола, отбивающего этот порт с вашего адреса. Снаружи (с другого провайдера) тот же порт обычно доступен."
-	case errors.Is(err, syscall.ETIMEDOUT), errors.Is(err, context.DeadlineExceeded):
+	case neterr.IsTimeout(err):
 		return "Порт фильтруется по пути: проверьте файрвол/антивирус на этом компьютере и правила на шлюзе."
-	case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH):
+	case neterr.IsUnreachable(err):
 		return "Проверьте сеть и маршрут до сервера."
 	}
 	return "Проверьте адрес сервера, порт и доступность сети."

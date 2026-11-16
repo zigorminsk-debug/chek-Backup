@@ -5,19 +5,15 @@ package checker
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
-	"net"
-	"os"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/zigorminsk-debug/chek-Backup/internal/config"
 	"github.com/zigorminsk-debug/chek-Backup/internal/imapx"
 	"github.com/zigorminsk-debug/chek-Backup/internal/logx"
+	"github.com/zigorminsk-debug/chek-Backup/internal/neterr"
 	"github.com/zigorminsk-debug/chek-Backup/internal/probe"
 	"github.com/zigorminsk-debug/chek-Backup/internal/rules"
 )
@@ -283,30 +279,7 @@ func (c *Checker) Run(ctx context.Context) Result {
 // isNetworkError reports whether err looks like a socket level failure that the
 // step by step probe is able to explain.
 func isNetworkError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var sysErr *os.SyscallError
-	var netErr *net.OpError
-	var dnsErr *net.DNSError
-	if errors.As(err, &sysErr) || errors.As(err, &netErr) || errors.As(err, &dnsErr) {
-		return true
-	}
-	for _, target := range []error{
-		syscall.ECONNREFUSED, syscall.ETIMEDOUT, syscall.ECONNRESET,
-		syscall.EHOSTUNREACH, syscall.ENETUNREACH, io.EOF,
-	} {
-		if errors.Is(err, target) {
-			return true
-		}
-	}
-	msg := strings.ToLower(err.Error())
-	for _, marker := range []string{"dial tcp", "connectex", "no such host", "i/o timeout", "connection refused", "actively refused"} {
-		if strings.Contains(msg, marker) {
-			return true
-		}
-	}
-	return false
+	return neterr.IsNetwork(err)
 }
 
 func (c *Checker) fail(res Result, title string, err error) Result {
