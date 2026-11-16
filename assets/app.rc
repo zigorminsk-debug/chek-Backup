@@ -1,0 +1,6 @@
+// Ресурсы исполняемого файла: иконка и манифест (DPI, версия Windows).
+// Собирается windres из MinGW:
+//   cd assets && windres -i app.rc -o ../cmd/chek-backup/rsrc_windows_amd64.syso -O coff
+
+1 ICON "app.ico"
+1 24 "app.manifest"

@@ -1,0 +1,101 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows amd64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Set up MinGW toolchain (cgo for Fyne)
+        shell: pwsh
+        run: |
+          $env:Path = "$env:USERPROFILE\go\bin;C:\msys64\mingw64\bin;C:\msys64\ucrt64\bin;C:\mingw64\bin;$env:Path"
+          if (-not (Get-Command gcc -ErrorAction SilentlyContinue)) {
+            Write-Host "MinGW не найден, устанавливаю через Chocolatey"
+            choco install mingw -y --no-progress
+            $env:Path = "C:\ProgramData\chocolatey\bin;C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin;$env:Path"
+          }
+          gcc --version | Select-Object -First 1
+          "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Resolve modules
+        run: go mod tidy
+
+      - name: Embed icon and manifest
+        shell: pwsh
+        run: |
+          Push-Location assets
+          windres -i app.rc -o ../cmd/chek-backup/rsrc_windows_amd64.syso -O coff
+          if ($LASTEXITCODE -ne 0) { throw "windres завершился с ошибкой" }
+          Pop-Location
+          Get-Item cmd/chek-backup/rsrc_windows_amd64.syso
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./internal/...
+
+      - name: Build executable
+        shell: pwsh
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          go build -trimpath -buildvcs=false `
+            -ldflags "-s -w -H windowsgui -X main.version=${{ github.ref_name }}" `
+            -o dist/chek-backup.exe ./cmd/chek-backup
+          Get-Item dist/chek-backup.exe | Select-Object Name, Length
+
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          $info = Get-Item dist/chek-backup.exe
+          if ($info.Length -lt 5MB) { throw "исполняемый файл подозрительно мал" }
+          Copy-Item go.mod, go.sum dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chek-backup-windows-amd64
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: chek-backup-windows-amd64
+          path: dist
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/chek-backup.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true
